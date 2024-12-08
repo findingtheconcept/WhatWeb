@@ -29,7 +29,7 @@ end
 
 def decode_html_entities(s)
   html_entities = { '&quot;' => '"', '&apos;' => "'", '&amp;' => '&', '&lt;' => '<', '&gt;' => '>' }
-  s.gsub( /#{html_entities.keys.join("|")}/, html_entities)
+  s.gsub(/#{html_entities.keys.join("|")}/, html_entities)
 end
 
 ### matching
@@ -52,7 +52,7 @@ end
 
 # some plugins want a random string in URLs
 def randstr
-  rand(36**8).to_s(36)
+  rand(36 ** 8).to_s(36)
 end
 
 def match_ghdb(ghdb, body, _meta, _status, base_uri)
@@ -277,46 +277,40 @@ class Target
         http = ExtendedHTTP.new(@uri.host, @uri.port)
       end
 
-      # set timeouts
-      http.open_timeout = $HTTP_OPEN_TIMEOUT
-      http.read_timeout = $HTTP_READ_TIMEOUT
-
-      # if it's https://
-      # i wont worry about certificates, verfication, etc
       if @uri.class == URI::HTTPS
         http.use_ssl = true
         OpenSSL::SSL::SSLContext::DEFAULT_PARAMS[:ciphers] = 'TLSv1:TLSv1.1:TLSv1.2:SSLv3:SSLv2'
         http.verify_mode = OpenSSL::SSL::VERIFY_NONE
       end
 
+      # Установка таймаутов
+      http.open_timeout = $HTTP_OPEN_TIMEOUT
+      http.read_timeout = $HTTP_READ_TIMEOUT
+
       getthis = @uri.path + (@uri.query.nil? ? '' : '?' + @uri.query)
-      req = nil
+      req = case options[:method]
+            when 'GET' then Net::HTTP::Get.new(getthis, $CUSTOM_HEADERS)
+            when 'HEAD' then Net::HTTP::Head.new(getthis, $CUSTOM_HEADERS)
+            when 'POST'
+              r = Net::HTTP::Post.new(getthis, $CUSTOM_HEADERS)
+              r.set_form_data(options[:data])
+              r
+            end
 
-      if options[:method] == 'GET'
-        req = ExtendedHTTP::Get.new(getthis, $CUSTOM_HEADERS)
-      end
-      if options[:method] == 'HEAD'
-        req = ExtendedHTTP::Head.new(getthis, $CUSTOM_HEADERS)
-      end
-      if options[:method] == 'POST'
-        req = ExtendedHTTP::Post.new(getthis, $CUSTOM_HEADERS)
-        req.set_form_data(options[:data])
-      end
-
-      req.basic_auth $BASIC_AUTH_USER, $BASIC_AUTH_PASS if $BASIC_AUTH_USER
+      req.basic_auth($BASIC_AUTH_USER, $BASIC_AUTH_PASS) if $BASIC_AUTH_USER
 
       res = http.request(req)
-      @raw_headers = http.raw.join("\n")
-      @headers = {}
+      @raw_headers = res.to_hash.map { |k, v| "#{k}: #{v}" }.join("\n")
+      @headers = res.to_hash.transform_keys(&:downcase)
+      @body = res.body || ""
+      @status = res.code.to_i
 
-      @body = res.body
-      
       @body = Helper::convert_to_utf8(@body)
       @raw_headers = Helper::convert_to_utf8(@raw_headers)
 
-      res.each_header do |x, y| 
+      res.each_header do |x, y|
         newx, newy = x.dup, y.dup
-        @headers[ Helper::convert_to_utf8(newx) ] = Helper::convert_to_utf8(newy)
+        @headers[Helper::convert_to_utf8(newx)] = Helper::convert_to_utf8(newy)
       end
 
       @headers['set-cookie'] = res.get_fields('set-cookie').join("\n") unless @headers['set-cookie'].nil?
@@ -326,53 +320,51 @@ class Target
 
     rescue StandardError => err
       raise err
-
     end
   end
+end
 
+def get_redirection_target
+  newtarget_m, newtarget_h, newtarget = nil
 
-  def get_redirection_target
-    newtarget_m, newtarget_h, newtarget = nil
-
-    if @@meta_refresh_regex =~ @body
-      metarefresh = @body.scan(@@meta_refresh_regex).flatten.first
-      metarefresh = decode_html_entities(metarefresh).strip
-      newtarget_m = URI.join(@target, metarefresh).to_s # this works for relative and absolute
-    end
-
-    # HTTP 3XX redirect
-    if (300..399) === @status && @headers && @headers['location']
-
-      location = @headers['location']
-      begin
-        newtarget_h = URI.join(@target, location).to_s
-      rescue StandardError => err
-        # the combinaton of the current target and the new location must be invalid 
-        error("Error: Invalid redirection from #{@target} to #{location}. #{err}")
-        return nil
-      end
-
-    end
-
-    # if both meta refresh location and HTTP location are set, then the HTTP location overrides
-    if newtarget_m || newtarget_h
-      case $FOLLOW_REDIRECT
-      when 'never'
-        # no_redirects = true # this never gets back to main loop but no prob
-      when 'http-only'
-        newtarget = newtarget_h
-      when 'meta-only'
-        newtarget = newtarget_m
-      when 'same-site'
-        newtarget = (newtarget_h || newtarget_m) if URI.parse((newtarget_h || newtarget_m)).host == @uri.host # defaults to _h if both are present
-      when 'always'
-        newtarget = (newtarget_h || newtarget_m)
-      else
-        error('Error: Invalid REDIRECT mode')
-      end
-    end
-    newtarget = nil if newtarget == @uri.to_s # circular redirection not allowed
-
-    newtarget
+  if @@meta_refresh_regex =~ @body
+    metarefresh = @body.scan(@@meta_refresh_regex).flatten.first
+    metarefresh = decode_html_entities(metarefresh).strip
+    newtarget_m = URI.join(@target, metarefresh).to_s # this works for relative and absolute
   end
+
+  # HTTP 3XX redirect
+  if (300..399) === @status && @headers && @headers['location']
+
+    location = @headers['location']
+    begin
+      newtarget_h = URI.join(@target, location).to_s
+    rescue StandardError => err
+      # the combinaton of the current target and the new location must be invalid
+      error("Error: Invalid redirection from #{@target} to #{location}. #{err}")
+      return nil
+    end
+
+  end
+
+  # if both meta refresh location and HTTP location are set, then the HTTP location overrides
+  if newtarget_m || newtarget_h
+    case $FOLLOW_REDIRECT
+    when 'never'
+      # no_redirects = true # this never gets back to main loop but no prob
+    when 'http-only'
+      newtarget = newtarget_h
+    when 'meta-only'
+      newtarget = newtarget_m
+    when 'same-site'
+      newtarget = (newtarget_h || newtarget_m) if URI.parse((newtarget_h || newtarget_m)).host == @uri.host # defaults to _h if both are present
+    when 'always'
+      newtarget = (newtarget_h || newtarget_m)
+    else
+      error('Error: Invalid REDIRECT mode')
+    end
+  end
+  newtarget = nil if newtarget == @uri.to_s # circular redirection not allowed
+
+  newtarget
 end
