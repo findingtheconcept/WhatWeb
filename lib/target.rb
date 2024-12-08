@@ -271,6 +271,7 @@ class Target
 
     begin
       if $USE_PROXY == true
+        $PROXY_PASS = $PROXY_PASS.gsub(/[\[\]"]/, '')
         http = ExtendedHTTP::Proxy($PROXY_HOST, $PROXY_PORT, $PROXY_USER, $PROXY_PASS).new(@uri.host, @uri.port)
       else
         http = ExtendedHTTP.new(@uri.host, @uri.port)
